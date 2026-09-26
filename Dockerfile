@@ -4,9 +4,8 @@ FROM --platform=$BUILDPLATFORM golang:1.26.3-alpine AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
-ARG NODE_DOMAIN=centerbeam.proxy.rlwy.net
 
-RUN apk update && apk add --no-cache make git openssl
+RUN apk update && apk add --no-cache make git
 
 WORKDIR /src
 
@@ -18,15 +17,10 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} make NAME=main build
 
 RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} make install_xray
 
-# Generate self-signed TLS certificate
-RUN mkdir -p /src/certs && \
-    openssl req -x509 -newkey ec \
-    -pkeyopt ec_paramgen_curve:P-256 \
-    -keyout /src/certs/ssl_key.pem \
-    -out /src/certs/ssl_cert.pem \
-    -days 3650 -nodes \
-    -subj "/CN=${NODE_DOMAIN}" \
-    -addext "subjectAltName = DNS:${NODE_DOMAIN},DNS:localhost,IP:127.0.0.1"
+
+# ============================================================
+# Runtime
+# ============================================================
 
 FROM alpine:latest
 
@@ -34,24 +28,54 @@ RUN apk update && apk add --no-cache \
     wireguard-tools \
     nftables \
     iproute2 \
-    procps
+    procps \
+    openssl \
+    ca-certificates
 
 WORKDIR /app
 
 COPY --from=builder /src/main /app/main
 COPY --from=builder /usr/local/bin/xray /usr/local/bin/xray
 COPY --from=builder /usr/local/share/xray /usr/local/share/xray
-COPY --from=builder /src/certs /app/certs
 
-ENV SSL_CERT_FILE=/app/certs/ssl_cert.pem
-ENV SSL_KEY_FILE=/app/certs/ssl_key.pem
+# ------------------------------------------------------------
+# PasarGuard Node settings
+# ------------------------------------------------------------
+
 ENV NODE_HOST=0.0.0.0
 ENV SERVICE_PORT=62050
 ENV SERVICE_PROTOCOL=grpc
 ENV GENERATED_CONFIG_PATH=/var/lib/pg-node/generated
 
-RUN mkdir -p /var/lib/pg-node/generated
+# ------------------------------------------------------------
+# Certificate settings
+#
+# NODE_DOMAIN is intentionally NOT hard-coded.
+#
+# Railway / Installer can provide:
+#
+# NODE_DOMAIN=example.proxy.rlwy.net
+#
+# The certificate will be generated at container startup.
+# ------------------------------------------------------------
+
+ENV NODE_DOMAIN=localhost
+
+ENV SSL_CERT_FILE=/app/certs/ssl_cert.pem
+ENV SSL_KEY_FILE=/app/certs/ssl_key.pem
+
+RUN mkdir -p \
+    /app/certs \
+    /var/lib/pg-node/generated
+
+# ------------------------------------------------------------
+# Startup script
+# ------------------------------------------------------------
+
+COPY entrypoint.sh /entrypoint.sh
+
+RUN chmod +x /entrypoint.sh
 
 EXPOSE 62050
 
-ENTRYPOINT ["./main"]
+ENTRYPOINT ["/entrypoint.sh"]
